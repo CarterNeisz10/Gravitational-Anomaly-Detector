@@ -1,7 +1,9 @@
-"""Locate LIGO strain data available through the GWOSC public API."""
+"""Locate and filter LIGO strain data available through GWOSC."""
 
 import json
 import subprocess
+
+import h5py
 
 
 GWOSC_API = "https://gwosc.org/api/v2/strain-files"
@@ -10,6 +12,9 @@ DETECTOR = "L1"
 START_TIME = 1126068224
 END_TIME = 1126072320
 SAMPLE_RATE_KHZ = 4
+SAMPLES_PER_SECOND = SAMPLE_RATE_KHZ * 1024
+
+DATA_FILE = "data/L-L1_LOSC_4_V1-1126068224-4096.hdf5"
 
 
 def get_strain_files():
@@ -44,8 +49,53 @@ def get_strain_files():
     return json.loads(result.stdout)
 
 
+def get_required_mask(flag_names):
+    """Create a bitmask requiring every listed flag to pass."""
+    required_mask = 0
+
+    for index in range(len(flag_names)):
+        required_mask |= 1 << index
+
+    return required_mask
+
+
+def get_passing_strain(file_path):
+    """Return strain measurements from seconds that pass all quality checks."""
+    with h5py.File(file_path, "r") as file:
+        strain = file["strain/Strain"][:]
+
+        dq_mask = file["quality/simple/DQmask"][:]
+        dq_names = file["quality/simple/DQShortnames"][:]
+
+        injection_mask = file["quality/injections/Injmask"][:]
+        injection_names = file["quality/injections/InjShortnames"][:]
+
+        required_dq_mask = get_required_mask(dq_names)
+        required_injection_mask = get_required_mask(injection_names)
+
+        # A second passes only when every required quality bit is set.
+        quality_pass = (dq_mask & required_dq_mask) == required_dq_mask
+
+        # These flags being set means no hardware injection is present.
+        no_injection = (
+            injection_mask & required_injection_mask
+        ) == required_injection_mask
+
+        passing_seconds = quality_pass & no_injection
+
+        passing_strain = []
+
+        for second, passes in enumerate(passing_seconds):
+            if passes:
+                start = second * SAMPLES_PER_SECOND
+                end = start + SAMPLES_PER_SECOND
+                passing_strain.extend(strain[start:end])
+
+        return passing_strain
+
+
 def main():
-    """Locate and display GWOSC strain files matching the configured query."""
+    """Locate GWOSC files and extract strain from passing data."""
     print(f"Searching GWOSC for {DETECTOR} strain data...")
 
     response = get_strain_files()
@@ -59,6 +109,10 @@ def main():
         print("Sample rate:", strain_file["sample_rate_kHz"], "kHz")
         print("HDF5:", strain_file["hdf5_url"])
         print()
+
+    passing_strain = get_passing_strain(DATA_FILE)
+
+    print("Passing strain measurements:", len(passing_strain))
 
 
 if __name__ == "__main__":
