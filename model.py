@@ -1,4 +1,11 @@
-"""Autoencoder model for detecting anomalies in LIGO strain data."""
+"""
+Convolutional autoencoder for detecting anomalies in LIGO strain data.
+
+The model is trained in two stages. It first learns to reconstruct simulated
+Advanced LIGO background noise, then continues training on quality-filtered
+real LIGO strain. Poor reconstruction of unseen strain can later be used as
+an indication that a window differs from the learned background.
+"""
 
 import torch
 import torch.nn as nn
@@ -8,14 +15,27 @@ from simulation import generate_background_noise, create_windows
 from Main import get_real_training_windows
 
 
+# Training settings
 BATCH_SIZE = 32
 SIMULATED_EPOCHS = 10
 REAL_EPOCHS = 5
 LEARNING_RATE = 0.001
 
 
+"""
+    Normalize each strain window independently.
+
+    Each window is transformed to have approximately zero mean and unit
+    standard deviation. This prevents differences in absolute scale from
+    dominating autoencoder training.
+
+    Args:
+        windows: PyTorch tensor containing strain windows.
+
+    Returns:
+        Tensor: Normalized strain windows as 32-bit floating-point values.
+"""
 def normalize_windows(windows):
-    """Normalize each strain window to zero mean and unit standard deviation."""
     windows = windows.double()
 
     mean = windows.mean(dim=2, keepdim=True)
@@ -24,78 +44,95 @@ def normalize_windows(windows):
     return ((windows - mean) / std).float()
 
 
-class StrainAutoencoder(nn.Module):
-    """One-dimensional convolutional autoencoder for LIGO strain."""
+"""
+    One-dimensional convolutional autoencoder for LIGO strain data.
 
+    The encoder compresses each 4096-sample strain window through three
+    convolutional layers. The decoder mirrors this structure using
+    transposed convolutions to reconstruct the original strain window.
+"""
+class StrainAutoencoder(nn.Module):
+
+    """
+        Initialize the encoder and decoder layers.
+    """
     def __init__(self):
         super().__init__()
 
         self.encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=8, stride=4, padding=2),
             nn.ReLU(),
-
             nn.Conv1d(16, 32, kernel_size=8, stride=4, padding=2),
             nn.ReLU(),
-
             nn.Conv1d(32, 64, kernel_size=8, stride=4, padding=2),
             nn.ReLU(),
         )
 
         self.decoder = nn.Sequential(
-            nn.ConvTranspose1d(
-                64, 32, kernel_size=8, stride=4, padding=2
-            ),
+            nn.ConvTranspose1d(64, 32, kernel_size=8, stride=4, padding=2),
             nn.ReLU(),
-
-            nn.ConvTranspose1d(
-                32, 16, kernel_size=8, stride=4, padding=2
-            ),
+            nn.ConvTranspose1d(32, 16, kernel_size=8, stride=4, padding=2),
             nn.ReLU(),
-
-            nn.ConvTranspose1d(
-                16, 1, kernel_size=8, stride=4, padding=2
-            ),
+            nn.ConvTranspose1d(16, 1, kernel_size=8, stride=4, padding=2),
         )
 
+    """
+        Reconstruct a strain window using the autoencoder.
+
+        Args:
+            strain: Batch of normalized strain windows.
+
+        Returns:
+            Tensor: Reconstructed strain windows.
+    """
     def forward(self, strain):
-        """Encode and reconstruct a strain window."""
         encoded = self.encoder(strain)
-        reconstructed = self.decoder(encoded)
-
-        return reconstructed
+        return self.decoder(encoded)
 
 
+"""
+    Convert strain windows into normalized PyTorch tensors.
+
+    The individual windows are stacked into a batch, given a single input
+    channel for the Conv1d layers, and normalized independently.
+
+    Args:
+        windows: Collection of strain windows.
+
+    Returns:
+        Tensor: Normalized strain data with shape
+        (number of windows, 1, samples per window).
+"""
 def prepare_windows(windows):
-    """Convert strain windows into normalized PyTorch tensors."""
     data = torch.stack([
         torch.tensor(window, dtype=torch.float64)
         for window in windows
     ])
 
-    data = data.unsqueeze(1)
-
-    return normalize_windows(data)
+    return normalize_windows(data.unsqueeze(1))
 
 
+"""
+    Train the autoencoder to reconstruct background strain.
+
+    Training minimizes mean squared reconstruction error using the Adam
+    optimizer. The same function is used for both simulated-background
+    training and real-background fine-tuning.
+
+    Args:
+        model: StrainAutoencoder being trained.
+        training_data: Normalized strain windows used for training.
+        epochs: Number of complete passes through the training data.
+        stage_name: Description printed before the training stage begins.
+"""
 def train_model(model, training_data, epochs, stage_name):
-    """Train the autoencoder to reconstruct background strain."""
     dataset = TensorDataset(training_data)
-
-    data_loader = DataLoader(
-        dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-    )
+    data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     loss_function = nn.MSELoss()
-
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=LEARNING_RATE,
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     model.train()
-
     print(stage_name)
 
     for epoch in range(epochs):
@@ -123,7 +160,7 @@ def train_model(model, training_data, epochs, stage_name):
 if __name__ == "__main__":
     model = StrainAutoencoder()
 
-    # Stage 1: simulated LIGO background
+    # Stage 1: train on simulated Advanced LIGO background noise.
     print("Generating simulated LIGO background...")
 
     simulated_background = generate_background_noise()
@@ -140,10 +177,8 @@ if __name__ == "__main__":
         "Stage 1: simulated background training",
     )
 
-    print()
-
-    # Stage 2: real quality-filtered LIGO background
-    print("Loading real LIGO background...")
+    # Stage 2: continue training on quality-filtered real LIGO background.
+    print("\nLoading real LIGO background...")
 
     real_windows = get_real_training_windows()
     real_data = prepare_windows(real_windows)
@@ -158,7 +193,7 @@ if __name__ == "__main__":
         "Stage 2: real LIGO background training",
     )
 
+    # Save only the trained model parameters rather than the full model object.
     torch.save(model.state_dict(), "strain_autoencoder.pth")
 
-    print()
-    print("Trained model saved to strain_autoencoder.pth")
+    print("\nTrained model saved to strain_autoencoder.pth")
