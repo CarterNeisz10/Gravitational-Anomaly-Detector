@@ -7,6 +7,7 @@ from pycbc.types import TimeSeries
 from pycbc.filter import highpass, lowpass
 
 from model import StrainAutoencoder, normalize_windows
+from physics import analyze_candidate_physics
 
 
 SAMPLE_RATE = 4096
@@ -456,6 +457,118 @@ def calculate_correlation_significance(
 
     return empirical_p_value
 
+def get_physical_strain(
+    file_path,
+    start_sample,
+    number_of_samples,
+):
+    """Load calibrated detector strain without standardizing it."""
+    with h5py.File(file_path, "r") as file:
+        strain = file["strain/Strain"][
+            start_sample:start_sample + number_of_samples
+        ]
+
+    return torch.tensor(
+        strain,
+        dtype=torch.float64,
+    )
+
+def get_conditioned_physical_strain(
+    file_path,
+    start_sample,
+    number_of_samples,
+):
+    """Band-limit calibrated strain while preserving its physical scale."""
+    strain = get_physical_strain(
+        file_path,
+        start_sample,
+        number_of_samples,
+    )
+
+    strain = TimeSeries(
+        strain.numpy(),
+        delta_t=1 / SAMPLE_RATE,
+    )
+
+    strain = highpass(strain, 30.0)
+    strain = lowpass(strain, 500.0)
+
+    return torch.tensor(
+        strain.numpy(),
+        dtype=torch.float64,
+    )
+
+def characterize_candidate(
+    file_path,
+    candidate_gps,
+    file_gps_start,
+):
+    """Measure basic properties of a surviving strain candidate."""
+    start_second = candidate_gps - file_gps_start
+    start_sample = start_second * SAMPLE_RATE
+
+    physical_strain = get_conditioned_physical_strain(
+        file_path,
+        start_sample,
+        SAMPLE_RATE * 2,
+    )
+
+    peak_physical_strain = torch.max(
+        torch.abs(physical_strain)
+    ).item()
+
+    strain = get_conditioned_strain(
+        file_path,
+        start_sample,
+        SAMPLE_RATE * 2,
+    )
+
+    peak_amplitude = torch.max(
+        torch.abs(strain)
+    ).item()
+
+    frequency_spectrum = torch.fft.rfft(strain)
+
+    frequencies = torch.fft.rfftfreq(
+        len(strain),
+        d=1 / SAMPLE_RATE,
+    )
+
+    power = torch.abs(
+        frequency_spectrum
+    ) ** 2
+
+    # Ignore the zero-frequency component.
+    dominant_index = torch.argmax(
+        power[1:]
+    ).item() + 1
+
+    dominant_frequency = frequencies[
+        dominant_index
+    ].item()
+
+    print("\nSignal characterization:")
+    print("GPS:", candidate_gps)
+    print(
+        "Peak conditioned amplitude:",
+        f"{peak_amplitude:.6f}",
+    )
+
+    print(
+        "Peak physical strain:",
+        f"{peak_physical_strain:.6e}",
+    )
+
+    print(
+        "Dominant frequency:",
+        f"{dominant_frequency:.2f} Hz",
+    )
+
+    return {
+        "peak_conditioned_amplitude": peak_amplitude,
+        "peak_physical_strain": peak_physical_strain,
+        "dominant_frequency_hz": dominant_frequency,
+    }
 
 def main():
     """Run the complete cross-detector anomaly-detection pipeline."""
@@ -677,12 +790,24 @@ def main():
             "validation."
         )
 
+        characterization = characterize_candidate(
+            L1_TEST_FILE,
+            gps_time,
+            TEST_GPS_START,
+        )
+
+        physics_result = analyze_candidate_physics(
+            characterization["peak_physical_strain"]
+        )
+
         surviving_candidates.append(
             {
                 "gps": gps_time,
                 "delay_ms": delay_ms,
                 "correlation": correlation,
                 "p_value": p_value,
+                "characterization": characterization,
+                "physics": physics_result,
             }
         )
 
