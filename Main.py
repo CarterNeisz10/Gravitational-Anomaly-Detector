@@ -5,6 +5,8 @@ import subprocess
 
 import h5py
 
+from simulation import create_windows
+
 
 GWOSC_API = "https://gwosc.org/api/v2/strain-files"
 
@@ -14,19 +16,15 @@ END_TIME = 1126072320
 SAMPLE_RATE_KHZ = 4
 SAMPLES_PER_SECOND = SAMPLE_RATE_KHZ * 1024
 
-DATA_FILE = "data/L-L1_LOSC_4_V1-1126068224-4096.hdf5"
+DATA_FILES = [
+    "data/L-L1_LOSC_4_V1-1126068224-4096.hdf5",
+    "data/L-L1_LOSC_4_V1-1126072320-4096.hdf5",
+]
 
 
 def get_strain_files():
     """
     Query GWOSC for strain files covering the configured detector and time range.
-
-    Returns:
-        dict: Parsed GWOSC API response containing matching strain-file metadata.
-
-    Raises:
-        subprocess.CalledProcessError: If the GWOSC request fails.
-        json.JSONDecodeError: If GWOSC returns an invalid JSON response.
     """
     url = (
         f"{GWOSC_API}"
@@ -37,8 +35,6 @@ def get_strain_files():
         f"&pagesize=10"
     )
 
-    # curl is used because direct Python HTTPS requests to GWOSC are
-    # unreliable in the current local development environment.
     result = subprocess.run(
         ["curl", "-sS", "--fail", "--max-time", "30", url],
         capture_output=True,
@@ -73,10 +69,8 @@ def get_passing_strain(file_path):
         required_dq_mask = get_required_mask(dq_names)
         required_injection_mask = get_required_mask(injection_names)
 
-        # A second passes only when every required quality bit is set.
         quality_pass = (dq_mask & required_dq_mask) == required_dq_mask
 
-        # These flags being set means no hardware injection is present.
         no_injection = (
             injection_mask & required_injection_mask
         ) == required_injection_mask
@@ -94,8 +88,19 @@ def get_passing_strain(file_path):
         return passing_strain
 
 
+def get_real_training_windows():
+    """Load passing real LIGO strain and split it into one-second windows."""
+    passing_strain = []
+
+    for file_path in DATA_FILES:
+        file_strain = get_passing_strain(file_path)
+        passing_strain.extend(file_strain)
+
+    return create_windows(passing_strain)
+
+
 def main():
-    """Locate GWOSC files and extract strain from passing data."""
+    """Locate GWOSC files and prepare passing strain windows."""
     print(f"Searching GWOSC for {DETECTOR} strain data...")
 
     response = get_strain_files()
@@ -110,9 +115,19 @@ def main():
         print("HDF5:", strain_file["hdf5_url"])
         print()
 
-    passing_strain = get_passing_strain(DATA_FILE)
+    real_windows = get_real_training_windows()
 
-    print("Passing strain measurements:", len(passing_strain))
+    print(
+        "Passing strain measurements:",
+        len(real_windows) * SAMPLES_PER_SECOND,
+    )
+    print(
+        "Passing strain duration:",
+        len(real_windows),
+        "seconds",
+    )
+    print("Real training windows:", len(real_windows))
+    print("Measurements per window:", len(real_windows[0]))
 
 
 if __name__ == "__main__":
